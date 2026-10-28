@@ -9,6 +9,25 @@ Treibt das serielle Display, liest die Trittfrequenz, stellt die Bremse über
 einen **Servo per PWM** (Stufe 1–10 aus der GUI), exponiert BLE FTMS
 (Indoor Bike Data) und relayt Daten von BLE-Herzfrequenzgurten.
 
+## Wie die AVR-Firmware auf den D52Q portiert wurde (Analyse 2026-10-28)
+
+`src/atmegamain.c` lief auf einem ATmega für drei Geräte (`SPRINTBOK`,
+`BIKE`, `BIKE`+`CICLOTTE`) und sprach per UART mit einem externen GFIT-Modul.
+Im D52Q-Port (`nohrd_bike`, Konfiguration nur `BIKE`):
+
+- GFIT-Modul entfällt: BLE läuft nativ auf dem nRF52832 (FTMS, Custom-NOHRD-
+  Service, HR-Gurt-Relay). Der GFIT-Modellstring (`gf13`: NOHRDNB/NOHRDNC)
+  ist jetzt `CONFIG_BT_DEVICE_NAME`.
+- `App_State`-Zustandsautomat → Superloop mit Seitentabelle `pages[]` und
+  `run_button_action()`. Display-Protokoll unverändert.
+- ADC/EEPROM → Zephyr-ADC (AIN1) + NVS im internen Flash.
+- Trittfrequenz per GPIO-Interrupt (P0.11).
+- Neu: OTA über MCUboot, Secondary-Slot auf externem SPI-NOR.
+- Leistungs-/Geschwindigkeitsformeln 1:1 übernommen.
+- AVR-CICLOTTE-Vorlage: `setServoAngle()`, `EnableDisablePWM()`,
+  `BTN_ACTION_INCREASE/DECREASE_ANGLE`, `actResUpdate()` (`ResistanceNom =
+  (idx+1)/10`), Seitenlayouts `page_Session`/`page_bt_connection`.
+
 ## Ciclotte vs. Bike — Unterschiede
 
 Variante wird in `src/main.c` oben per `#define BIKE` / `#define CICLOTTE`
@@ -70,12 +89,31 @@ ohne `CICLOTTE` braucht wieder die ADC-Overlays aus `nohrd_bike`.
   Bike-Images lassen sich nicht per OTA auf eine Ciclotte spielen und
   umgekehrt). Gitignored — niemals `git add -f`. Separat sichern!
 
-## Gegenüber `nohrd_bike` mitgefixt
+## Gefundene Fehler (in beiden Projekten behoben)
 
 - DFU-Build linkte nicht: `CONFIG_BT_GATT_DYNAMIC_DB=y` fehlte in
   `sysbuild/<image>/prj.conf` (dynamischer HR-Service).
 - `heart_rate_attrs` in `ble_ftms.c` war `const`, aber
   `bt_gatt_service_register()` schreibt Handles hinein → jetzt nicht-const.
+- In `nohrd_bike` als Commit `521918a` nachgezogen und nach GitHub
+  (Waterrower/BikeD52) gepusht.
+
+## Repo / Git
+
+- Eigenes lokales Repo, **kein Remote** (Bike-`origin` wurde entfernt).
+  Für GitHub ein Repo anlegen (analog `Waterrower/Sprintbok_D52`), dann
+  `git remote add origin <url>` + `git push -u origin master`.
+- Ableitungs-Commit: `3e0eacd` („Derive Ciclotte controller from nohrd_bike").
+
+## Build-Umgebung (für Builds außerhalb von VS Code)
+
+`tools/build-profile.ps1` braucht die NCS-Toolchain im PATH
+(`C:\ncs\toolchains\936afb6332`: `opt\bin`, `opt\zephyr-sdk\arm-zephyr-eabi\bin`,
+`ZEPHYR_TOOLCHAIN_VARIANT=zephyr`, `ZEPHYR_SDK_INSTALL_DIR`,
+`ZEPHYR_BASE=C:\ncs\v3.3.1\zephyr`). In PowerShell 5.1 die Ausgabe nicht mit
+`*>`/`2>&1` umleiten — das Skript läuft mit `$ErrorActionPreference=Stop`,
+und CMake-Ausgaben auf stderr brechen den Build dann ab.
+Stand 2026-10-28: App- und DFU-Build grün, am echten Gerät noch nicht getestet.
 
 ## Offene Punkte
 

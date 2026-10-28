@@ -1,7 +1,7 @@
 sample:
-  name: NOHRD Bike Controller
+  name: NOHRD Ciclotte Controller
 tests:
-  app.nohrd_bike:
+  app.nohrd_ciclotte:
     tags:
       - bike
       - display
@@ -9,7 +9,7 @@ tests:
       - gpio
     depends_on:
       - gpio
-      - adc
+      - pwm
       - bluetooth
     harness: led
     integration_platforms:

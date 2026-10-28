@@ -1,6 +1,6 @@
 {
     "nrf-connect.applications": [],
     "nrf-connect.debugging.bindings": {
-        "${workspaceFolder}/build_devkit_spi": "Launch nohrd_bike/build_devkit_spi"
+        "${workspaceFolder}/build_ciclotte_app": "Launch Ciclotte/build_ciclotte_app"
     }
 }

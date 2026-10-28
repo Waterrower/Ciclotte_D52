@@ -391,8 +391,9 @@ static ssize_t write_custom_nohrd(struct bt_conn *conn,
 
 /* Registered dynamically (see ble_ftms_hrs_set_active) only once a BLE HR
  * sensor is actually connected, so idle FTMS-only clients never see an
- * advertised Heart Rate Service that has no data behind it. */
-static const struct bt_gatt_attr heart_rate_attrs[] = {
+ * advertised Heart Rate Service that has no data behind it. Not const:
+ * bt_gatt_service_register() writes the assigned handles into the array. */
+static struct bt_gatt_attr heart_rate_attrs[] = {
 	BT_GATT_PRIMARY_SERVICE(&heart_rate_service_uuid.uuid),
 	BT_GATT_CHARACTERISTIC(&heart_rate_measurement_uuid.uuid,
 			       BT_GATT_CHRC_NOTIFY,

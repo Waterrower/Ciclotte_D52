@@ -6,7 +6,7 @@ This is the only active hardware target.
 
 - Display UART TX: P0.06
 - Display UART RX: P0.08
-- Resistance potentiometer: AIN1 / P0.03
+- Brake servo PWM: P0.04 (PWM0 channel 0)
 - Cadence input: P0.11
 - Green status LED / SPI OK: P0.17
 - Red status LED / SPI error: P0.13

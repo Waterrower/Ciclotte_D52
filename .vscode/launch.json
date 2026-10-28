@@ -15,8 +15,8 @@
         {
             "type": "nrf-connect",
             "request": "launch",
-            "name": "Launch nohrd_bike/build_devkit_spi",
-            "config": "${workspaceFolder}/build_devkit_spi",
+            "name": "Launch Ciclotte/build_ciclotte_app",
+            "config": "${workspaceFolder}/build_ciclotte_app",
             "runToEntryPoint": "main"
         }
     ]

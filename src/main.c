@@ -4,12 +4,25 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+/*
+ * Product variant, same switches as the AVR firmware (atmegamain.c):
+ * BIKE alone reads the brake position from the analog resistance knob,
+ * BIKE + CICLOTTE drives a brake servo from the GUI +/- buttons via PWM.
+ */
+#define NOHRD 1
+#define BIKE 1
+#define CICLOTTE 1
+
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <zephyr/kernel.h>
+#ifdef CICLOTTE
+#include <zephyr/drivers/pwm.h>
+#else
 #include <zephyr/drivers/adc.h>
+#endif
 #include <zephyr/drivers/flash.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/uart.h>
@@ -81,8 +94,12 @@
 #define APP_LANGUAGE_US 4U
 #define METERS_PER_MILE 1609U
 #define MAX_DISPLAY_PACE_SEC (30U * 60U)
-#define NOHRD 1
-#define BIKE 1
+#ifdef CICLOTTE
+#define SERVO_PULSE_MIN_US 500U
+#define SERVO_PULSE_MAX_US 2500U
+#define SERVO_MAX_ANGLE_DEG 180U
+#define SERVO_LEVEL_COUNT 10U
+#endif
 
 BUILD_ASSERT(IMG_BG_SS_2 == 0xcf, "IMG_BG_SS_2 must match display asset id 0xcf");
 BUILD_ASSERT(IMG_TILE3_BLANK_LIGHT == 0x06, "IMG_TILE3_BLANK_LIGHT must be 0x06");
@@ -97,8 +114,13 @@ static const struct gpio_dt_spec led = {
 };
 static const struct gpio_dt_spec tick_input =
 	GPIO_DT_SPEC_GET(USER_NODE, tick_gpios);
+#ifdef CICLOTTE
+static const struct pwm_dt_spec brake_servo =
+	PWM_DT_SPEC_GET_BY_IDX(USER_NODE, 0);
+#else
 static const struct adc_dt_spec resistance_adc =
 	ADC_DT_SPEC_GET_BY_IDX(USER_NODE, 0);
+#endif
 
 enum user_state {
 	USER_NONE,
@@ -169,12 +191,21 @@ static bool confirm_stop_was_paused;
 static struct gpio_callback tick_input_cb;
 static volatile uint32_t cadence_edge_count;
 static volatile bool cadence_wake_pending;
-static uint16_t resistance_raw;
 static uint8_t measured_resistance_percent;
 static uint8_t measured_cadence_rpm;
+#ifdef CICLOTTE
+/* Servo angle per brake level (shown as 1..10), taken from the AVR firmware. */
+static const uint8_t servo_level_angle_deg[SERVO_LEVEL_COUNT] = {
+	53, 67, 82, 97, 110, 115, 123, 130, 150, 180,
+};
+static uint8_t servo_level;
+static bool servo_output_enabled;
+#else
+static uint16_t resistance_raw;
 static uint16_t resistance_cal_raw_100 = 210;
 static uint16_t resistance_cal_raw_0 = 980;
 static bool resistance_calibrated;
+#endif
 static bool resistance_nvs_ready;
 static enum display_power_state display_power_state = DISPLAY_POWER_ACTIVE;
 static uint32_t display_last_activity_ms;
@@ -309,10 +340,12 @@ struct ui_settings_data {
 };
 
 static struct nvs_fs resistance_nvs;
-static struct menu_button calibration_button;
 static uint8_t image_browser_index;
+#ifndef CICLOTTE
+static struct menu_button calibration_button;
 static uint8_t calibration_step;
 static bool calibration_restore_darkmode;
+#endif
 static enum hr_search_mode hr_search_mode = HR_SEARCH_BLE;
 static bool update_resistance_input(void);
 
@@ -356,10 +389,12 @@ static const uint8_t hr_connect_images[] = {
 	IMG_HR_INDICATOR_ICON_OFF,
 };
 
+#ifndef CICLOTTE
 static const uint8_t calibration_images[] = {
 	IMG_BG_CALIBRATION,
 	IMG_TILE0_NOHRD_LOGO,
 };
+#endif
 
 static const uint8_t information_images[] = {
 	IMG_BG_GRID_LIGHT,
@@ -423,9 +458,11 @@ static const char *const text_back[] = {"Go Back", "Zur}ck", "reour", "devolver"
 static const char *const text_hr[] = {"HR Connect", "Puls", "Cardio", "Pulso", "HR Connect"};
 static const char *const text_bt_off[] = {"BT Off", "BT Aus", "BT off", "BT off", "BT Off"};
 static const char *const text_bt_on[] = {"BT On", "BT An", "BT on", "BT on", "BT On"};
+#ifndef CICLOTTE
 static const char *const text_calibration[] = {"Calibration", "Kalibrierung", "Calibration", "Calibracion", "Calibration"};
 static const char *const text_cal_reset[] = {"Cal Reset", "Kal. Reset", "Cal. reset", "Cal. reset", "Cal Reset"};
 static const char *const text_reset_error[] = {"Reset Error", "Reset Fehler", "Erreur reset", "Error reset", "Reset Error"};
+#endif
 static const char *const text_start[] = {"Start", "Start", "Depart", "Inicio", "Start"};
 static const char *const text_next[] = {"Next", "Weiter", "Suivant", "Siguiente", "Next"};
 static const char *const text_ble[] = {"BLE", "BLE", "BLE", "BLE", "BLE"};
@@ -434,6 +471,7 @@ static const char *const text_info_line1[] = {"Inform.", "Infos", "d'information
 static const char *const text_info_line2[] = {"Scan", "Scannen", "scannez", "Escanear", "Scan"};
 static const char *const text_info_line3[] = {"QR-Code", "Sie den", "le", "el c@digo", "QR-Code"};
 static const char *const text_info_line4[] = {"below", "QR-Code", "code QR", "QR-Code", "below"};
+#ifndef CICLOTTE
 static const char *const text_step[] = {"Step", "Schritt", "$tape", "Paso", "Step"};
 static const char *const text_cal_line0[] = {"Turn the", "Stellen", "R$glez la", "ajuste", "Turn the"};
 static const char *const text_cal_line1[] = {"resistance", "Sie den", "r$sistance a", "la", "resistance"};
@@ -444,6 +482,7 @@ static const char *const text_cal_line3_min[] = {"left", "auf Min.", "Au minimum
 static const char *const text_cal_line4_min[] = {"all the way", "bis Anschlag", "jusqu'a la but$e", "para detener", "all the way"};
 static const char *const text_cal_line0_end[] = {"Calibration", "Kalibration", "Calibrage", "Calibraci@n", "Calibration"};
 static const char *const text_cal_line1_end[] = {"completed.", "fertig.", "fini", "listo", "completed."};
+#endif
 static const char *const text_minutes[] = {"Minutes", "Minuten", "Minutes", "Minutos", "Minutes"};
 static const char *const text_meter[] DISPLAY_UNUSED = {"Meter", "Meter", "Metres", "Metros", "Miles"};
 static const char *const text_watts[] = {"Watts", "Watt", "Watts", "Vatios", "Watts"};
@@ -464,7 +503,9 @@ static const char *const text_avg_pace[] = {"Avg Pace", "{ Pace", "{ Allure", "{
 static const char *const text_yes[] = {"Yes", "Ja", "Oui", "Si", "Yes"};
 static const char *const text_no[] = {"No", "Nein", "Non", "No", "No"};
 static const char *const text_quit[] = {"Quit?", "Beenden?", "Quitter?", "Salir?", "Quit?"};
+#ifndef CICLOTTE
 static const char *const text_end[] = {"End", "Ende", "Fin", "Fin", "End"};
+#endif
 static const char *const text_bt[] = {"Bluetooth", "Bluetooth", "Bluetooth", "Bluetooth", "Bluetooth"};
 static const char text_distance_mi[] = "Distance/mi";
 static const char text_version_firmware[] = "FW 4.0.0";
@@ -686,7 +727,12 @@ static const struct menu_button settings1_buttons[] = {
 static const struct menu_button settings2_buttons[] = {
 	{
 		.button_id = BTN_TILE0,
+#ifdef CICLOTTE
+		/* No resistance calibration to reset on the servo brake. */
+		.action_id = BTN_ACTION_NONE,
+#else
 		.action_id = BTN_ACTION_TILE0,
+#endif
 		.text_field_id = SF_LABEL0_DARK,
 		.localized_text = text_settings,
 	},
@@ -699,6 +745,13 @@ static const struct menu_button settings2_buttons[] = {
 		.localized_text = text_info,
 		.top_layer = IMG_TILE1_INFO_LIGHT,
 	},
+#ifdef CICLOTTE
+	{
+		.button_id = BTN_TILE2,
+		.action_id = BTN_ACTION_NONE,
+		.image_id = IMG_TILE2_BLANK_LIGHT,
+	},
+#else
 	{
 		.button_id = BTN_TILE2,
 		.action_id = BTN_ACTION_GOTO_CALIBRATE_UP,
@@ -708,6 +761,7 @@ static const struct menu_button settings2_buttons[] = {
 		.localized_text = text_calibration,
 		.top_layer = IMG_TILE2_CALIBRATE_UP_LIGHT,
 	},
+#endif
 	{
 		.button_id = BTN_TILE3,
 		.action_id = BTN_ACTION_TOGGLE_BLUETOOTH,
@@ -793,6 +847,7 @@ static const struct menu_button setup_buttons[] = {
 	},
 };
 
+#ifndef CICLOTTE
 static struct menu_button calibration_button = {
 	.button_id = BTN_TILE4,
 	.action_id = BTN_ACTION_GOTO_CALIBRATE_DOWN,
@@ -802,6 +857,7 @@ static struct menu_button calibration_button = {
 	.localized_text = text_next,
 	.top_layer = IMG_TILE4_NEXT_ICON_LIGHT,
 };
+#endif
 
 static const struct menu_button information_buttons[] = {
 	{
@@ -840,6 +896,28 @@ static const struct menu_button image_browser_buttons[] = {
 };
 
 static const struct menu_button session_buttons[] = {
+#ifdef CICLOTTE
+	/* As on the AVR Ciclotte: tile 4 sets the brake level, tapping the
+	 * header (tile 0) ends the session. There is no pause. */
+	{
+		.button_id = BTN_TILE4T,
+		.action_id = BTN_ACTION_INCREASE_ANGLE,
+		.image_id = IMG_HALFTILE40_BLANK_LIGHT,
+		.press_image_id = IMG_HALFTILE40_FRAME_LIGHT,
+		.top_layer = IMG_HALFTILE40_PLUS_ICON_LIGHT,
+	},
+	{
+		.button_id = BTN_TILE4B,
+		.action_id = BTN_ACTION_DECREASE_ANGLE,
+		.image_id = IMG_HALFTILE41_BLANK_LIGHT,
+		.press_image_id = IMG_HALFTILE41_FRAME_LIGHT,
+		.top_layer = IMG_HALFTILE41_MINUS_ICON_LIGHT,
+	},
+	{
+		.button_id = BTN_TILE0,
+		.action_id = BTN_ACTION_STOP_SESSION,
+	},
+#else
 	{
 		.button_id = BTN_TILE4T,
 		.action_id = BTN_ACTION_PAUSE_SESSION,
@@ -854,6 +932,7 @@ static const struct menu_button session_buttons[] = {
 		.press_image_id = IMG_HALFTILE41_FRAME_LIGHT,
 		.top_layer = IMG_HALFTILE41_STOP_ICON_LIGHT,
 	},
+#endif
 	{
 		.button_id = BTN_TILE1L,
 		.action_id = BTN_ACTION_LEFTCYCLE_SESSION_TILE1,
@@ -887,6 +966,26 @@ static const struct menu_button session_buttons[] = {
 };
 
 static const struct menu_button bt_connection_buttons[] = {
+#ifdef CICLOTTE
+	{
+		.button_id = BTN_TILE0,
+		.action_id = BTN_ACTION_STOP_SESSION,
+	},
+	{
+		.button_id = BTN_TILE4T,
+		.action_id = BTN_ACTION_INCREASE_ANGLE,
+		.image_id = IMG_HALFTILE40_BLANK_LIGHT,
+		.press_image_id = IMG_HALFTILE40_FRAME_LIGHT,
+		.top_layer = IMG_HALFTILE40_PLUS_ICON_LIGHT,
+	},
+	{
+		.button_id = BTN_TILE4B,
+		.action_id = BTN_ACTION_DECREASE_ANGLE,
+		.image_id = IMG_HALFTILE41_BLANK_LIGHT,
+		.press_image_id = IMG_HALFTILE41_FRAME_LIGHT,
+		.top_layer = IMG_HALFTILE41_MINUS_ICON_LIGHT,
+	},
+#else
 	{
 		.button_id = BTN_TILE4B,
 		.action_id = BTN_ACTION_STOP_SESSION,
@@ -896,6 +995,7 @@ static const struct menu_button bt_connection_buttons[] = {
 		.localized_text = text_end,
 		.top_layer = IMG_HALFTILE41_DISCONBT_LIGHT,
 	},
+#endif
 };
 
 static const struct menu_button summary_buttons[] = {
@@ -1011,6 +1111,7 @@ static const struct menu_page pages[] = {
 		.buttons = hr_connect_buttons,
 		.button_count = ARRAY_SIZE(hr_connect_buttons),
 	},
+#ifndef CICLOTTE
 	[PAGE_CALIBRATION] = {
 		.page_id = PAGE_CALIBRATION,
 		.images = calibration_images,
@@ -1018,6 +1119,7 @@ static const struct menu_page pages[] = {
 		.buttons = &calibration_button,
 		.button_count = 1,
 	},
+#endif
 	[PAGE_INFORMATION] = {
 		.page_id = PAGE_INFORMATION,
 		.images = information_images,
@@ -1533,7 +1635,7 @@ static void display_set_brightness(uint8_t brightness)
 	display_brightness = brightness;
 }
 
-static void display_show_gif(uint8_t gif)
+static void DISPLAY_UNUSED display_show_gif(uint8_t gif)
 {
 	uint8_t payload[] = {0x88, gif};
 
@@ -1805,6 +1907,17 @@ static const char *run_external_flash_test(void)
 	return result;
 }
 
+static void format_developer_resistance_line(char *buffer, size_t len)
+{
+#ifdef CICLOTTE
+	snprintf(buffer, len, "Servo L%u %udeg %s", servo_level + 1U,
+		 servo_level_angle_deg[servo_level],
+		 servo_output_enabled ? "on" : "off");
+#else
+	snprintf(buffer, len, "Resistance raw: %u", resistance_raw);
+#endif
+}
+
 static void show_developer_page(void)
 {
 	char line0[24];
@@ -1814,7 +1927,7 @@ static void show_developer_page(void)
 	construct_page(PAGE_DEVELOPER);
 	display_show_text(SF_LABEL0_DARK, "Developer", strlen("Developer"));
 
-	snprintf(line0, sizeof(line0), "Resistance raw: %u", resistance_raw);
+	format_developer_resistance_line(line0, sizeof(line0));
 	display_show_text(SF_INFO_LINE0_LIGHT, line0, strlen(line0));
 
 	snprintf(line1, sizeof(line1), "Cadence pin: %d",
@@ -1843,7 +1956,7 @@ static void update_developer_page(void)
 	}
 	last_update_ms = now_ms;
 
-	snprintf(line0, sizeof(line0), "Resistance raw: %u", resistance_raw);
+	format_developer_resistance_line(line0, sizeof(line0));
 	display_show_text(SF_INFO_LINE0_LIGHT, line0, strlen(line0));
 
 	snprintf(line1, sizeof(line1), "Cadence pin: %d",
@@ -2390,6 +2503,53 @@ static void show_preselection_page(enum app_page_id page_id)
 	update_preselection_page();
 }
 
+#ifdef CICLOTTE
+static uint8_t servo_level_resistance_percent(void)
+{
+	/* Same mapping as the AVR firmware: level 1..10 -> 10..100 %. */
+	return (uint8_t)((servo_level + 1U) * 10U);
+}
+
+static int servo_apply(void)
+{
+	uint32_t angle = servo_level_angle_deg[servo_level];
+	uint32_t pulse_us = SERVO_PULSE_MIN_US +
+			    (angle * (SERVO_PULSE_MAX_US - SERVO_PULSE_MIN_US)) /
+			    SERVO_MAX_ANGLE_DEG;
+
+	if (!pwm_is_ready_dt(&brake_servo)) {
+		return -ENODEV;
+	}
+
+	/* A 0 ns pulse keeps the line low, so the servo stops holding. */
+	return pwm_set_pulse_dt(&brake_servo,
+				servo_output_enabled ? PWM_USEC(pulse_us) : 0U);
+}
+
+static void servo_set_enabled(bool enabled)
+{
+	servo_output_enabled = enabled;
+	(void)servo_apply();
+}
+
+/* The servo brake has a fixed travel, so there is nothing to calibrate;
+ * report "calibrated" to the NOHRD app and reject calibration writes. */
+static bool custom_ble_resistance_calibrated(void)
+{
+	return true;
+}
+
+static int custom_ble_set_resistance_calibration(uint8_t value_id,
+						 const uint8_t *data,
+						 size_t len)
+{
+	ARG_UNUSED(value_id);
+	ARG_UNUSED(data);
+	ARG_UNUSED(len);
+
+	return -ENOTSUP;
+}
+#else
 static uint8_t normalize_resistance_percent(uint16_t raw)
 {
 	int32_t span;
@@ -2481,6 +2641,7 @@ static int custom_ble_set_resistance_calibration(uint8_t value_id,
 	resistance_calibrated = resistance_cal_raw_100 != resistance_cal_raw_0;
 	return save_resistance_calibration();
 }
+#endif
 
 static bool session_ring_preferences_valid(const struct session_ring_pref_data *data)
 {
@@ -2574,6 +2735,7 @@ static uint8_t summary_metric_for_session_metric(uint8_t metric)
 	}
 }
 
+#ifndef CICLOTTE
 static void show_calibration_page(uint8_t step)
 {
 	const char *line0 = text_cal_line0[app_language];
@@ -2637,6 +2799,17 @@ static void show_calibration_page(uint8_t step)
 			  strlen(text_step[app_language]));
 	display_show_text(SF_VALUE3_LIGHT, value, strlen(value));
 }
+#endif
+
+static unsigned int resistance_display_value(void)
+{
+#ifdef CICLOTTE
+	/* Shown as brake level 1..10, like the AVR Ciclotte. */
+	return session.resistance_percent / 10U;
+#else
+	return session.resistance_percent;
+#endif
+}
 
 static void format_duration(char *buffer, size_t len, uint32_t seconds)
 {
@@ -2691,7 +2864,7 @@ static void format_session_metric(uint8_t metric, char *buffer, size_t len)
 		(void)snprintf(buffer, len, "%u", session.cadence_rpm);
 		break;
 	case SESSION_METRIC_RESISTANCE:
-		(void)snprintf(buffer, len, "%u", session.resistance_percent);
+		(void)snprintf(buffer, len, "%u", resistance_display_value());
 		break;
 	case SESSION_METRIC_SPEED:
 		if (use_imperial_units()) {
@@ -2926,7 +3099,7 @@ static void update_bt_connection_values(void)
 	(void)snprintf(value, sizeof(value), "%u", session.watts);
 	display_show_text(SF_VALUE1_LIGHT, value, strlen(value));
 
-	(void)snprintf(value, sizeof(value), "%u", session.resistance_percent);
+	(void)snprintf(value, sizeof(value), "%u", resistance_display_value());
 	display_show_text(SF_VALUE2_LIGHT, value, strlen(value));
 
 	(void)snprintf(value, sizeof(value), "%u", session.heartrate_bpm);
@@ -2975,6 +3148,9 @@ static void start_bt_connection_session(void)
 	session.heartrate_bpm = 0;
 	session.max_heartrate_bpm = 0;
 
+#ifdef CICLOTTE
+	servo_set_enabled(true);
+#endif
 	render_bt_connection_page();
 }
 
@@ -2982,6 +3158,9 @@ static void end_bt_connection_session(void)
 {
 	(void)k_work_cancel_delayable(&bt_disconnect_work);
 
+#ifdef CICLOTTE
+	servo_set_enabled(false);
+#endif
 	bt_connection_session_active = false;
 	session.active = false;
 	session.paused = false;
@@ -3021,6 +3200,9 @@ static void start_session(enum session_mode mode)
 
 	apply_session_ring_preferences();
 
+#ifdef CICLOTTE
+	servo_set_enabled(true);
+#endif
 	render_session_page();
 }
 
@@ -3030,6 +3212,10 @@ static void show_summary(void)
 		session_ring_pref[i] = session_rings[i].idx;
 	}
 	(void)save_session_ring_preferences();
+
+#ifdef CICLOTTE
+	servo_set_enabled(false);
+#endif
 
 	session.active = false;
 	session.paused = false;
@@ -3197,6 +3383,10 @@ static void display_power_update(void)
 		display_set_brightness(DISPLAY_BRIGHTNESS_OFF);
 		display_activate_button(BTN_WAKEUP);
 		display_power_state = DISPLAY_POWER_OFF;
+#ifdef CICLOTTE
+		/* AVR equivalent: PWM off when entering deep sleep. */
+		servo_set_enabled(false);
+#endif
 		return;
 	}
 
@@ -3312,6 +3502,27 @@ static void update_hr_connect_page(void)
 	last_update_ms = now_ms;
 	show_hr_status_lines();
 }
+
+#ifdef CICLOTTE
+static void servo_change_level(int8_t delta)
+{
+	if (delta > 0 && servo_level < SERVO_LEVEL_COUNT - 1U) {
+		servo_level++;
+	} else if (delta < 0 && servo_level > 0U) {
+		servo_level--;
+	}
+
+	(void)servo_apply();
+	measured_resistance_percent = servo_level_resistance_percent();
+	session.resistance_percent = measured_resistance_percent;
+
+	if (bt_connection_session_active) {
+		update_bt_connection_values();
+	} else {
+		update_session_values();
+	}
+}
+#endif
 
 static void run_button_action(uint8_t action_id)
 {
@@ -3450,6 +3661,14 @@ static void run_button_action(uint8_t action_id)
 			cycle_session_ring(2, 1);
 		}
 		break;
+#ifdef CICLOTTE
+	case BTN_ACTION_INCREASE_ANGLE:
+		servo_change_level(1);
+		break;
+	case BTN_ACTION_DECREASE_ANGLE:
+		servo_change_level(-1);
+		break;
+#endif
 	case BTN_ACTION_PAUSE_SESSION:
 		session.paused = !session.paused;
 		if (active_page != NULL && active_page->page_id == PAGE_SESSION) {
@@ -3520,6 +3739,7 @@ static void run_button_action(uint8_t action_id)
 	case BTN_ACTION_RETURN_FROM_INFO:
 		construct_page(PAGE_MAIN_MENU);
 		break;
+#ifndef CICLOTTE
 	case BTN_ACTION_TILE0:
 		if (active_page != NULL &&
 		    active_page->page_id == PAGE_SETTINGS_2) {
@@ -3532,6 +3752,7 @@ static void run_button_action(uint8_t action_id)
 			display_show_text(SF_LABEL0_DARK, status, strlen(status));
 		}
 		break;
+#endif
 	case BTN_ACTION_TILE3:
 		if (active_page != NULL &&
 		    active_page->page_id == PAGE_HR_CONNECT) {
@@ -3547,6 +3768,7 @@ static void run_button_action(uint8_t action_id)
 			image_browser_next();
 		}
 		break;
+#ifndef CICLOTTE
 	case BTN_ACTION_GOTO_CALIBRATE_UP:
 		show_calibration_page(1);
 		break;
@@ -3565,6 +3787,7 @@ static void run_button_action(uint8_t action_id)
 		app_darkmode = calibration_restore_darkmode;
 		construct_page(PAGE_SETTINGS_1);
 		break;
+#endif
 	case BTN_ACTION_GOTO_MAIN_MENU:
 		if (active_page != NULL && active_page->page_id == PAGE_SUMMARY) {
 			leave_summary();
@@ -3855,7 +4078,9 @@ static int init_resistance_storage(void)
 {
 	const struct device *flash_dev = DEVICE_DT_GET(DT_MTD_FROM_FIXED_PARTITION(STORAGE_NODE));
 	struct flash_pages_info page_info;
+#ifndef CICLOTTE
 	struct resistance_cal_data data;
+#endif
 	struct session_ring_pref_data pref_data;
 	struct ui_settings_data ui_data;
 	uint32_t storage_offset = DT_REG_ADDR(STORAGE_NODE);
@@ -3885,6 +4110,7 @@ static int init_resistance_storage(void)
 
 	resistance_nvs_ready = true;
 
+#ifndef CICLOTTE
 	ret = nvs_read(&resistance_nvs, RESISTANCE_CAL_NVS_ID,
 		       &data, sizeof(data));
 	if (ret == sizeof(data) &&
@@ -3894,6 +4120,7 @@ static int init_resistance_storage(void)
 		resistance_cal_raw_0 = data.raw_0;
 		resistance_calibrated = true;
 	}
+#endif
 
 	ret = nvs_read(&resistance_nvs, SESSION_RING_PREF_NVS_ID,
 		       &pref_data, sizeof(pref_data));
@@ -3939,13 +4166,29 @@ static int init_training_inputs(void)
 		return ret;
 	}
 
+#ifdef CICLOTTE
+	if (!pwm_is_ready_dt(&brake_servo)) {
+		return -ENODEV;
+	}
+
+	return 0;
+#else
 	if (!adc_is_ready_dt(&resistance_adc)) {
 		return -ENODEV;
 	}
 
 	return adc_channel_setup_dt(&resistance_adc);
+#endif
 }
 
+#ifdef CICLOTTE
+static bool update_resistance_input(void)
+{
+	/* No sensor: the brake position is whatever the GUI last commanded. */
+	measured_resistance_percent = servo_level_resistance_percent();
+	return true;
+}
+#else
 static bool update_resistance_input(void)
 {
 	static uint32_t last_sample_ms;
@@ -3986,6 +4229,7 @@ static bool update_resistance_input(void)
 	measured_resistance_percent = normalize_resistance_percent(resistance_raw);
 	return true;
 }
+#endif
 
 static uint32_t take_cadence_edges(void)
 {
@@ -4198,6 +4442,12 @@ int main(void)
 	if (init_training_inputs() != 0) {
 		boot_healthy = false;
 	}
+#ifdef CICLOTTE
+	else {
+		/* Like the AVR boot: drive the brake to the current level. */
+		servo_set_enabled(true);
+	}
+#endif
 
 	display_show_boot_splash();
 	construct_page(PAGE_MAIN_MENU);
